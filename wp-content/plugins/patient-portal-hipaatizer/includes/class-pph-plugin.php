@@ -20,6 +20,7 @@ class PPH_Plugin {
     public function init(): void {
         PPH_DB::maybe_upgrade();
         self::maybe_upgrade_plugin();
+        self::ensure_provider_role();
 
         add_filter( 'login_redirect', array( $this, 'client_login_redirect' ), 20, 3 );
         add_action( 'admin_init', array( $this, 'client_admin_landing_redirect' ) );
@@ -148,6 +149,18 @@ class PPH_Plugin {
         }
     }
 
+    private static function ensure_provider_role(): void {
+        if ( ! get_role( 'patient_portal_provider' ) ) {
+            add_role(
+                'patient_portal_provider',
+                'Provider',
+                array(
+                    'read' => true,
+                )
+            );
+        }
+    }
+
     private static function ensure_staff_roles(): void {
         $admin = get_role( 'administrator' );
         if ( $admin && ! $admin->has_cap( 'manage_patient_portal' ) ) {
@@ -250,6 +263,15 @@ class PPH_Plugin {
 
         clean_user_cache( (int) $user->ID );
         return true;
+    }
+
+    public static function is_provider( ?WP_User $user = null ): bool {
+        $user = $user ?: wp_get_current_user();
+        if ( ! $user || ! $user->ID ) {
+            return false;
+        }
+
+        return in_array( 'patient_portal_provider', (array) $user->roles, true );
     }
 
     public static function is_patient( ?WP_User $user = null ): bool {

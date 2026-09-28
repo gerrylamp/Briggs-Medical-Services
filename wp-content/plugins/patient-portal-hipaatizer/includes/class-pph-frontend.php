@@ -68,7 +68,7 @@ class PPH_Frontend {
         // A normal WooCommerce Customer/WordPress Subscriber who deliberately
         // signs in through Patient Login is granted Patient Portal access here.
         // Privileged staff accounts are explicitly excluded by grant_patient_access().
-        if ( ! PPH_Plugin::is_patient( $user ) && ! PPH_Plugin::grant_patient_access( $user ) ) {
+        if ( ! PPH_Plugin::is_patient( $user ) && ! PPH_Plugin::is_provider( $user ) && ! PPH_Plugin::grant_patient_access( $user ) ) {
             wp_logout();
             wp_safe_redirect( add_query_arg( 'pph_login', 'not_patient', PPH_Plugin::login_url() ) );
             exit;
@@ -80,7 +80,7 @@ class PPH_Frontend {
     }
 
     public function require_verified_patient_email( $user, $password ) {
-        if ( $user instanceof WP_User && PPH_Plugin::is_patient( $user ) && ! PPH_Plugin::email_is_verified( $user ) ) {
+        if ( $user instanceof WP_User && ! PPH_Plugin::is_provider( $user ) && PPH_Plugin::is_patient( $user ) && ! PPH_Plugin::email_is_verified( $user ) ) {
             return new WP_Error( 'pph_email_unverified', 'Please verify your email address before signing in to the patient portal.' );
         }
         return $user;
@@ -280,13 +280,13 @@ class PPH_Frontend {
         $this->enqueue_assets();
         if ( is_user_logged_in() ) {
             $current = wp_get_current_user();
-            if ( ! PPH_Plugin::is_patient( $current ) ) {
+            if ( ! PPH_Plugin::is_patient( $current ) && ! PPH_Plugin::is_provider( $current ) ) {
                 PPH_Plugin::grant_patient_access( $current );
             }
-            if ( PPH_Plugin::is_patient( $current ) ) {
+            if ( PPH_Plugin::is_patient( $current ) || PPH_Plugin::is_provider( $current ) ) {
                 return '<div class="pph-card pph-login-card"><p>You are already signed in.</p><p><a class="pph-button" href="' . esc_url( PPH_Plugin::portal_url() ) . '">Open Patient Portal</a></p></div>';
             }
-            return '<div class="pph-card pph-login-card"><h2>Patient Login</h2><div class="pph-alert pph-alert-error">This staff account cannot be used as a patient account. Please log out and use a patient/customer account.</div><p><a class="pph-button pph-button-secondary" href="' . esc_url( wp_logout_url( PPH_Plugin::login_url() ) ) . '">Log Out</a></p></div>';
+            return '<div class="pph-card pph-login-card"><h2>Patient Login</h2><div class="pph-alert pph-alert-error">This account cannot be used for the Patient Portal. Please log out and use a patient or provider account.</div><p><a class="pph-button pph-button-secondary" href="' . esc_url( wp_logout_url( PPH_Plugin::login_url() ) ) . '">Log Out</a></p></div>';
         }
 
         $login_notice = isset( $_GET['pph_login'] ) ? sanitize_key( wp_unslash( $_GET['pph_login'] ) ) : '';
@@ -299,7 +299,7 @@ class PPH_Frontend {
             <?php if ( $error ) : ?>
                 <div class="pph-alert pph-alert-error">The login details were not recognized. Please try again.</div>
             <?php elseif ( $not_patient ) : ?>
-                <div class="pph-alert pph-alert-error">This account cannot be used for the Patient Portal. Please use a patient/customer account.</div>
+                <div class="pph-alert pph-alert-error">This account cannot be used for the Patient Portal. Please use a patient or provider account.</div>
             <?php endif; ?>
             <form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" class="pph-form">
                 <input type="hidden" name="action" value="pph_login">
@@ -410,10 +410,10 @@ class PPH_Frontend {
         if ( ! is_user_logged_in() ) {
             return $this->login_required();
         }
-        if ( ! PPH_Plugin::is_patient() ) {
+        if ( ! PPH_Plugin::is_patient() && ! PPH_Plugin::is_provider() ) {
             return $this->patient_account_required();
         }
-        if ( ! PPH_Plugin::email_is_verified() ) {
+        if ( ! PPH_Plugin::is_provider() && ! PPH_Plugin::email_is_verified() ) {
             return $this->verification_required();
         }
         $user = wp_get_current_user();
@@ -437,15 +437,18 @@ class PPH_Frontend {
         if ( ! is_user_logged_in() ) {
             return $this->login_required();
         }
-        if ( ! PPH_Plugin::is_patient() ) {
+        if ( ! PPH_Plugin::is_patient() && ! PPH_Plugin::is_provider() ) {
             return $this->patient_account_required();
         }
-        if ( ! PPH_Plugin::email_is_verified() ) {
+        if ( ! PPH_Plugin::is_provider() && ! PPH_Plugin::email_is_verified() ) {
             return $this->verification_required();
         }
 
         $requested_key = isset( $_GET['pph_form'] ) ? sanitize_key( wp_unslash( $_GET['pph_form'] ) ) : '';
         if ( $requested_key ) {
+            if ( PPH_Plugin::is_provider() && 'patient-intake' === $requested_key ) {
+                return '<div class="pph-card"><h3>Service Forms</h3><p>Providers can access the available service forms directly from the Patient Portal.</p><a class="pph-button" href="' . esc_url( PPH_Plugin::portal_url() ) . '">Back to Patient Portal</a></div>';
+            }
             return $this->render_form( $requested_key, true );
         }
 
@@ -473,7 +476,7 @@ class PPH_Frontend {
 
                 <!-- Online Service Forms -->
                 <section class="pph-choice-card">
-                    <h3>Prefer to fill out your service forms online?</h3>
+                    <h3><?php echo PPH_Plugin::is_provider() ? 'Access your service forms online' : 'Prefer to fill out your service forms online?'; ?></h3>
 
                     <img
                         class="pph-choice-image"
@@ -482,19 +485,27 @@ class PPH_Frontend {
                     >
 
                     <p class="pph-choice-text">
-                        Complete your service forms securely online from the convenience of your computer or mobile device.
+                        <?php echo PPH_Plugin::is_provider() ? 'Select the service form you need to complete.' : 'Complete your service forms securely online from the convenience of your computer or mobile device.'; ?>
                     </p>
 
-                    <?php
-                    $intake_form_key = 'patient-intake';
-                    ?>
-
-                    <a
-                        class="pph-button"
-                        href="<?php echo esc_url( add_query_arg( 'pph_form', $intake_form_key, $portal_url ) ); ?>"
-                    >
-                        Get Started
-                    </a>
+                    <?php if ( PPH_Plugin::is_provider() ) : ?>
+                        <div class="pph-provider-services">
+                            <?php foreach ( PPH_Plugin::forms() as $service_key => $service_form ) : ?>
+                                <?php if ( empty( $service_form['active'] ) || 'patient-intake' === $service_key ) { continue; } ?>
+                                <a class="pph-button pph-button-full" href="<?php echo esc_url( add_query_arg( 'pph_form', $service_key, $portal_url ) ); ?>">
+                                    <?php echo esc_html( (string) $service_form['title'] ); ?>
+                                </a>
+                            <?php endforeach; ?>
+                        </div>
+                    <?php else : ?>
+                        <?php $intake_form_key = 'patient-intake'; ?>
+                        <a
+                            class="pph-button"
+                            href="<?php echo esc_url( add_query_arg( 'pph_form', $intake_form_key, $portal_url ) ); ?>"
+                        >
+                            Get Started
+                        </a>
+                    <?php endif; ?>
                 </section>
 
 
@@ -597,10 +608,10 @@ class PPH_Frontend {
         if ( ! is_user_logged_in() ) {
             return $this->login_required();
         }
-        if ( ! PPH_Plugin::is_patient() ) {
+        if ( ! PPH_Plugin::is_patient() && ! PPH_Plugin::is_provider() ) {
             return $this->patient_account_required();
         }
-        if ( ! PPH_Plugin::email_is_verified() ) {
+        if ( ! PPH_Plugin::is_provider() && ! PPH_Plugin::email_is_verified() ) {
             return $this->verification_required();
         }
         return $this->render_status_table();
@@ -611,10 +622,10 @@ class PPH_Frontend {
         if ( ! is_user_logged_in() ) {
             return $this->login_required();
         }
-        if ( ! PPH_Plugin::is_patient() ) {
+        if ( ! PPH_Plugin::is_patient() && ! PPH_Plugin::is_provider() ) {
             return $this->patient_account_required();
         }
-        if ( ! PPH_Plugin::email_is_verified() ) {
+        if ( ! PPH_Plugin::is_provider() && ! PPH_Plugin::email_is_verified() ) {
             return $this->verification_required();
         }
         $atts = shortcode_atts( array( 'key' => '' ), $atts, 'patient_form' );
@@ -782,7 +793,7 @@ class PPH_Frontend {
     }
 
     private function patient_account_required(): string {
-        return '<div class="pph-card"><h3>Patient account required</h3><p>This portal is available only to Patient accounts.</p><a class="pph-button" href="' . esc_url( PPH_Plugin::login_url() ) . '">Patient Login</a></div>';
+        return '<div class="pph-card"><h3>Patient account required</h3><p>This portal is available only to Patient or Provider accounts.</p><a class="pph-button" href="' . esc_url( PPH_Plugin::login_url() ) . '">Patient Login</a></div>';
     }
 
     private function login_required(): string {
