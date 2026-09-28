@@ -1,0 +1,15 @@
+# Ignore everything
+*
+
+# Allow .gitignore itself
+!.gitignore
+
+# Allow wp-content
+!wp-content/
+
+# Allow plugins directory
+!wp-content/plugins/
+
+# Allow IV Treatment Finder plugin
+!wp-content/plugins/patient-portal-hipaatizer/
+!wp-content/plugins/patient-portal-hipaatizer/**
