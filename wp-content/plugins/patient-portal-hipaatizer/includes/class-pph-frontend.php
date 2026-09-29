@@ -435,7 +435,7 @@ class PPH_Frontend {
     public function shortcode_dashboard(): string {
         $this->enqueue_assets();
         if ( ! is_user_logged_in() ) {
-            return $this->login_required();
+            return $this->render_public_portal();
         }
         if ( ! PPH_Plugin::is_patient() && ! PPH_Plugin::is_provider() ) {
             return $this->patient_account_required();
@@ -472,23 +472,16 @@ class PPH_Frontend {
                 <div><?php echo do_shortcode( '[patient_logout]' ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?></div>
             </div>
 
-            <div class="pph-choice-grid">
-
-                <!-- Online Service Forms -->
-                <section class="pph-choice-card">
-                    <h3><?php echo PPH_Plugin::is_provider() ? 'Access your service forms online' : 'Prefer to fill out your service forms online?'; ?></h3>
-
-                    <img
-                        class="pph-choice-image"
-                        src="/wp-content/uploads/2026/09/87117b39-2439-42c7-b678-a3212d755b81.webp"
-                        alt="Patient completing medical forms online"
-                    >
-
-                    <p class="pph-choice-text">
-                        <?php echo PPH_Plugin::is_provider() ? 'Select the service form you need to complete.' : 'Complete your service forms securely online from the convenience of your computer or mobile device.'; ?>
-                    </p>
-
-                    <?php if ( PPH_Plugin::is_provider() ) : ?>
+            <?php if ( PPH_Plugin::is_provider() ) : ?>
+                <div class="pph-choice-grid">
+                    <section class="pph-choice-card">
+                        <h3>Access your service forms online</h3>
+                        <img
+                            class="pph-choice-image"
+                            src="/wp-content/uploads/2026/09/87117b39-2439-42c7-b678-a3212d755b81.webp"
+                            alt="Patient completing medical forms online"
+                        >
+                        <p class="pph-choice-text">Select the service form you need to complete.</p>
                         <div class="pph-provider-services">
                             <?php foreach ( PPH_Plugin::forms() as $service_key => $service_form ) : ?>
                                 <?php if ( empty( $service_form['active'] ) || 'patient-intake' === $service_key ) { continue; } ?>
@@ -497,21 +490,113 @@ class PPH_Frontend {
                                 </a>
                             <?php endforeach; ?>
                         </div>
-                    <?php else : ?>
-                        <?php $intake_form_key = 'patient-intake'; ?>
-                        <a
-                            class="pph-button"
-                            href="<?php echo esc_url( add_query_arg( 'pph_form', $intake_form_key, $portal_url ) ); ?>"
+                    </section>
+                    <section class="pph-choice-card">
+                        <h3>Prefer to fill out your service forms in person?</h3>
+                        <img
+                            class="pph-choice-image"
+                            src="/wp-content/uploads/2026/09/f8eec8eb-8294-4410-be19-8c1d9a1fb80f.webp"
+                            alt="Patient speaking with medical office staff"
                         >
-                            Get Started
-                        </a>
-                    <?php endif; ?>
-                </section>
+                        <p class="pph-choice-text">Let us know below, and we'll get in contact with you.</p>
+                        <form class="pph-form pph-contact-form" method="post" action="">
+                            <div class="pph-two-col">
+                                <label><span>First Name</span><input type="text" name="first_name" autocomplete="given-name" required></label>
+                                <label><span>Last Name</span><input type="text" name="last_name" autocomplete="family-name" required></label>
+                            </div>
+                            <label><span>Email</span><input type="email" name="email" autocomplete="email" required></label>
+                            <label><span>Phone</span><input type="tel" name="phone" autocomplete="tel" required></label>
+                            <label>
+                                <span>Service</span>
+                                <select name="service" required>
+                                    <option value="">Select a service</option>
+                                    <option value="Phlebotomy Services">Phlebotomy Services</option>
+                                    <option value="Corporate and Facility Services">Corporate and Facility Services</option>
+                                    <option value="Drug and Alcohol Testing">Drug and Alcohol Testing</option>
+                                    <option value="IV Hydration and Wellness Treatments">IV Hydration and Wellness Treatments</option>
+                                    <option value="Gender Reveal and DNA Testing">Gender Reveal and DNA Testing</option>
+                                    <option value="Immigration Vaccination Services">Immigration Vaccination Services</option>
+                                </select>
+                            </label>
+                            <button class="pph-button" type="submit">Submit</button>
+                        </form>
+                    </section>
+                </div>
+            <?php else : ?>
+            <div class="pph-grid">
+                <?php
+                $active_count = 0;
+                foreach ( $forms as $key => $form ) :
+                    if ( empty( $form['active'] ) ) {
+                        continue;
+                    }
+                    $active_count++;
+                    $form_id = (string) ( $form['hipaatizer_form_id'] ?? '' );
+                    $row     = $form_id && isset( $latest[ $form_id ] ) ? $latest[ $form_id ] : null;
+                    $status  = $row ? (string) $row['status'] : 'not_submitted';
+                    ?>
+                    <article class="pph-card pph-form-card">
+                        <div class="pph-form-card-top">
+                            <h3><?php echo esc_html( (string) $form['title'] ); ?></h3>
+                            <?php echo $this->status_badge( $status ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?>
+                        </div>
+                        <?php if ( ! empty( $form['instructions'] ) ) : ?>
+                            <p><?php echo esc_html( (string) $form['instructions'] ); ?></p>
+                        <?php endif; ?>
+                        <?php if ( $row ) : ?>
+                            <p class="pph-muted">Last updated <?php echo esc_html( $this->display_date( (string) $row['updated_at'] ) ); ?></p>
+                        <?php else : ?>
+                            <p class="pph-muted">Complete your Intake Form to get started.</p>
+                        <?php endif; ?>
+                        <a class="pph-button" href="<?php echo esc_url( add_query_arg( 'pph_form', $key, $portal_url ) ); ?>">Get Started</a>
+                    </article>
+                <?php endforeach; ?>
 
+                <?php if ( 0 === $active_count ) : ?>
+                    <div class="pph-card"><p>No patient forms are available yet.</p></div>
+                <?php endif; ?>
+            </div>
+
+            <?php endif; ?>
+
+            <div class="pph-section">
+                <h3>Submission History</h3>
+                <?php echo $this->render_status_table(); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?>
+            </div>
+        </div>
+        <?php
+        return (string) ob_get_clean();
+    }
+
+    private function render_public_portal(): string {
+        $login_url = PPH_Plugin::login_url();
+
+        ob_start();
+        ?>
+        <div class="pph-portal pph-public-portal">
+            <div class="pph-choice-grid">
+
+                <!-- Online Service Forms -->
+                <section class="pph-choice-card">
+                    <h3>Prefer to fill out your service forms online?</h3>
+
+                    <img
+                        class="pph-choice-image"
+                        src="/wp-content/uploads/2026/09/87117b39-2439-42c7-b678-a3212d755b81.webp"
+                        alt="Patient completing medical forms online"
+                    >
+
+                    <p class="pph-choice-text">
+                        Please sign in to access the patient portal.
+                    </p>
+
+                    <a class="pph-button" href="<?php echo esc_url( $login_url ); ?>">
+                        Patient Login
+                    </a>
+                </section>
 
                 <!-- In-Person Service Forms -->
                 <section class="pph-choice-card">
-
                     <h3>Prefer to fill out your service forms in person?</h3>
 
                     <img
@@ -529,49 +614,25 @@ class PPH_Frontend {
                         method="post"
                         action=""
                     >
-
                         <div class="pph-two-col">
-
                             <label>
                                 <span>First Name</span>
-                                <input
-                                    type="text"
-                                    name="first_name"
-                                    autocomplete="given-name"
-                                    required
-                                >
+                                <input type="text" name="first_name" autocomplete="given-name" required>
                             </label>
-
                             <label>
                                 <span>Last Name</span>
-                                <input
-                                    type="text"
-                                    name="last_name"
-                                    autocomplete="family-name"
-                                    required
-                                >
+                                <input type="text" name="last_name" autocomplete="family-name" required>
                             </label>
-
                         </div>
 
                         <label>
                             <span>Email</span>
-                            <input
-                                type="email"
-                                name="email"
-                                autocomplete="email"
-                                required
-                            >
+                            <input type="email" name="email" autocomplete="email" required>
                         </label>
 
                         <label>
                             <span>Phone</span>
-                            <input
-                                type="tel"
-                                name="phone"
-                                autocomplete="tel"
-                                required
-                            >
+                            <input type="tel" name="phone" autocomplete="tel" required>
                         </label>
 
                         <label>
@@ -587,16 +648,9 @@ class PPH_Frontend {
                             </select>
                         </label>
 
-                        <button class="pph-button" type="submit">
-                            Submit
-                        </button>
+                        <button class="pph-button" type="submit">Submit</button>
                     </form>
                 </section>
-            </div>
-
-            <div class="pph-section">
-                <h3>Submission History</h3>
-                <?php echo $this->render_status_table(); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?>
             </div>
         </div>
         <?php
