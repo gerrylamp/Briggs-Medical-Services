@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Patient Portal for HIPAAtizer
  * Description: A lightweight patient portal for WordPress/Elementor that connects logged-in users to HIPAAtizer forms and stores only minimal submission status metadata.
- * Version: 1.1.1
+ * Version: 1.1.6
  * Author: Eziekiel
  * Text Domain: patient-portal-hipaatizer
  * Requires at least: 6.2
@@ -13,7 +13,7 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
-define( 'PPH_VERSION', '1.1.1' );
+define( 'PPH_VERSION', '1.1.6' );
 define( 'PPH_FILE', __FILE__ );
 define( 'PPH_DIR', plugin_dir_path( __FILE__ ) );
 define( 'PPH_URL', plugin_dir_url( __FILE__ ) );

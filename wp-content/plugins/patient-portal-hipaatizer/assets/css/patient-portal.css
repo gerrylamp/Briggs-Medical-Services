@@ -222,7 +222,7 @@
 .pph-iframe {
     display: block;
     width: 100%;
-    min-height: 900px;
+    min-height: 1000px;
     border: 0;
     background: #fff;
     border-radius: 12px;
@@ -240,7 +240,7 @@
         padding: 10px;
     }
     .pph-iframe {
-        min-height: 1100px;
+        min-height: 1300px;
     }
 }
 .pph-button-full {

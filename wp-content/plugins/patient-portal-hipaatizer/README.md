@@ -1,6 +1,6 @@
 # Patient Portal for HIPAAtizer
 
-Version 1.1.0
+Version 1.1.2
 
 A lightweight WordPress + Elementor patient portal that uses normal WordPress accounts for authentication and HIPAAtizer for patient forms.
 
@@ -247,3 +247,10 @@ The optional **Patient Portal Manager** role is safer than Administrator for lon
 - Removed **Incomplete** from the staff-editable Submission History status dropdown.
 - Renamed the patient-facing/admin display label **Under Review** to **Processing** while preserving the internal `under_review` key for compatibility with existing records and webhooks.
 - HIPAAtizer partial/save events may still use internal `incomplete` status; staff can no longer manually assign it.
+
+
+## Version 1.1.2
+
+- Requires patients to have a submitted/completed Patient Intake Form before service forms can be opened.
+- Enforces the intake requirement inside form rendering so direct `pph_form` URL access cannot bypass it.
+- Providers bypass the intake requirement and can access service forms directly.

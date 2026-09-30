@@ -693,6 +693,22 @@ class PPH_Frontend {
         }
 
         $form  = $forms[ $key ];
+
+        // Patients must complete the Patient Intake Form before accessing
+        // any of the six service forms. Providers intentionally bypass this
+        // requirement and can access service forms directly. Enforce this
+        // here, inside form rendering, so the rule cannot be bypassed by
+        // manually changing the pph_form URL parameter.
+        if (
+            'patient-intake' !== $key
+            && PPH_Plugin::is_patient()
+            && ! PPH_Plugin::is_provider()
+            && ! $this->patient_has_completed_intake( get_current_user_id() )
+        ) {
+            $intake_url = add_query_arg( 'pph_form', 'patient-intake', PPH_Plugin::portal_url() );
+            return '<div class="pph-portal pph-form-view"><div class="pph-card"><h2>Patient Intake Required</h2><p>Please complete your Patient Intake Form before accessing service forms.</p><a class="pph-button" href="' . esc_url( $intake_url ) . '">Complete Intake Form</a></div></div>';
+        }
+
         $embed = trim( (string) ( $form['embed'] ?? '' ) );
         ob_start();
         ?>
@@ -712,12 +728,42 @@ class PPH_Frontend {
         return (string) ob_get_clean();
     }
 
+    /**
+     * Determine whether the logged-in patient has a submitted/completed
+     * Patient Intake Form. Partial/incomplete and voided intake records do
+     * not satisfy the requirement.
+     */
+    private function patient_has_completed_intake( int $user_id ): bool {
+        if ( $user_id <= 0 ) {
+            return false;
+        }
+
+        $forms = PPH_Plugin::forms();
+        if ( ! isset( $forms['patient-intake'] ) ) {
+            return false;
+        }
+
+        $intake_id = trim( (string) ( $forms['patient-intake']['hipaatizer_form_id'] ?? '' ) );
+        if ( '' === $intake_id ) {
+            return false;
+        }
+
+        $latest = PPH_DB::latest_for_user_by_form( $user_id );
+        if ( ! isset( $latest[ $intake_id ] ) ) {
+            return false;
+        }
+
+        $status = (string) ( $latest[ $intake_id ]['status'] ?? '' );
+        return in_array( $status, array( 'submitted', 'under_review', 'action_needed', 'completed' ), true );
+    }
+
     private function render_embed( string $embed, array $form = array() ): string {
         if ( '' === $embed ) {
             return '<div class="pph-card"><p>The HIPAAtizer embed has not been configured for this form.</p></div>';
         }
 
         $prefill = $this->hipaatizer_prefill_values( $form );
+        $postmessage_prefill = $this->hipaatizer_postmessage_prefill( $form );
 
         if ( 0 === strpos( ltrim( $embed ), '[' ) ) {
             // HIPAAtizer documents that embedded forms can capture values from the
@@ -726,15 +772,145 @@ class PPH_Frontend {
             // rewrite iframe URLs when the official shortcode returns an iframe directly.
             $output = do_shortcode( $embed );
             $output = $this->add_prefill_to_iframe_sources( $output, $prefill );
-            return $this->prefill_parent_url_script( $prefill ) . $output;
+            $output = $this->mark_hipaatizer_iframes_for_postmessage( $output, $postmessage_prefill, $form );
+            return $this->hipaatizer_postmessage_script( $postmessage_prefill, $form ) . $this->prefill_parent_url_script( $prefill ) . $output;
         }
 
         if ( wp_http_validate_url( $embed ) ) {
             $url = $this->add_query_args_preserving_url( $embed, $prefill );
-            return '<iframe class="pph-iframe" src="' . esc_url( $url ) . '" title="Patient form" loading="eager" referrerpolicy="strict-origin-when-cross-origin"></iframe>';
+            $iframe = '<iframe class="pph-iframe" src="' . esc_url( $url ) . '" title="Patient form" loading="eager" referrerpolicy="strict-origin-when-cross-origin"></iframe>';
+            if ( ! empty( $postmessage_prefill ) ) {
+                $iframe = $this->mark_hipaatizer_iframes_for_postmessage( $iframe, $postmessage_prefill, $form );
+            }
+            return $this->hipaatizer_postmessage_script( $postmessage_prefill, $form ) . $iframe;
         }
 
         return '<div class="pph-card"><p>Invalid form embed. Add the official HIPAAtizer WordPress shortcode or an HTTPS form URL in Patient Portal &rarr; Forms.</p></div>';
+    }
+
+    /**
+     * Return the field/value pair that should be sent through HIPAAtizer's
+     * postMessage API. This is intentionally opt-in via the configured field
+     * Unique Name so normal URL-based email prefill remains unchanged.
+     */
+    private function hipaatizer_postmessage_prefill( array $form ): array {
+        if ( empty( $form['auto_prefill_email'] ) ) {
+            return array();
+        }
+
+        $field_name = isset( $form['email_field_unique_name'] ) ? trim( (string) $form['email_field_unique_name'] ) : '';
+        if ( 'patient_email' !== $field_name ) {
+            return array();
+        }
+
+        $user = wp_get_current_user();
+        if ( ! $user instanceof WP_User || ! $user->ID || ! is_email( $user->user_email ) ) {
+            return array();
+        }
+
+        return array(
+            'name'  => 'patient_email',
+            'value' => (string) $user->user_email,
+        );
+    }
+
+    /**
+     * Add a stable marker to the HIPAAtizer iframe so the postMessage handler
+     * targets only the form being rendered by this portal page.
+     */
+    private function mark_hipaatizer_iframes_for_postmessage( string $html, array $prefill, array $form = array() ): string {
+        if ( '' === $html || empty( $prefill ) || false === stripos( $html, '<iframe' ) ) {
+            return $html;
+        }
+
+        $workflow_id = isset( $form['hipaatizer_form_id'] ) ? trim( (string) $form['hipaatizer_form_id'] ) : '';
+        $iframe_id   = '' !== $workflow_id ? sanitize_html_class( $workflow_id . '-iframe' ) : '';
+
+        return (string) preg_replace_callback(
+            '/<iframe\\b([^>]*)>/i',
+            function ( $matches ) use ( $iframe_id ) {
+                $attrs = (string) $matches[1];
+                if ( '' !== $iframe_id && ! preg_match( '/\\bid\\s*=\\s*["\\\']/i', $attrs ) ) {
+                    $attrs = ' id="' . esc_attr( $iframe_id ) . '"' . $attrs;
+                }
+                if ( ! preg_match( '/\\bdata-pph-postmessage\\s*=\\s*["\\\']/i', $attrs ) ) {
+                    $attrs = ' data-pph-postmessage="patient_email"' . $attrs;
+                }
+                return '<iframe' . $attrs . '>';
+            },
+            $html,
+            1
+        );
+    }
+
+    private function hipaatizer_postmessage_script( array $prefill, array $form = array() ): string {
+        if ( empty( $prefill ) ) {
+            return '';
+        }
+
+        $value = wp_json_encode( (string) $prefill['value'], JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT );
+        if ( ! is_string( $value ) || '' === $value ) {
+            return '';
+        }
+
+        $workflow_id = isset( $form['hipaatizer_form_id'] ) ? trim( (string) $form['hipaatizer_form_id'] ) : '';
+        if ( '' === $workflow_id ) {
+            return '';
+        }
+
+        $iframe_id = sanitize_html_class( $workflow_id . '-iframe' );
+        $iframe_id_js = wp_json_encode( $iframe_id );
+
+        // This mirrors HIPAAtizer's generated PostMessage snippet for this form:
+        // fixed HIPAAtizer origin + workflow-specific iframe ID + FormReady event.
+        return '<script>(function(){'
+            . 'var FORM_ORIGIN="https://app.hipaatizer.com";'
+            . 'var IFRAME_ID=' . $iframe_id_js . ';'
+            . 'var patientEmail=' . $value . ';'
+            . 'var iframe=null;'
+            . 'var pending={};'
+            . 'function getIframe(){'
+                . 'if(!iframe){iframe=document.getElementById(IFRAME_ID);}'
+                . 'return iframe;'
+            . '}'
+            . 'window.addEventListener("message",function(event){'
+                . 'var frame=getIframe();'
+                . 'if(event.origin!==FORM_ORIGIN)return;'
+                . 'if(!frame||event.source!==frame.contentWindow)return;'
+                . 'var message=event.data||{};'
+                . 'if(message.kind==="response"){'
+                    . 'var resolve=pending[message.requestId];'
+                    . 'if(resolve){delete pending[message.requestId];resolve(message);}'
+                    . 'return;'
+                . '}'
+                . 'if(message.kind!=="event")return;'
+                . 'if(message.type==="FormReady"){'
+                    . 'console.info("[Patient Portal] HIPAAtizer form ready.");'
+                    . 'sendCommand("SetFieldValue",{name:"patient_email",value:patientEmail}).then(function(response){'
+                        . 'if(response&&response.success){console.info("[Patient Portal] HIPAAtizer patient email prefill accepted.");}'
+                        . 'else{console.warn("[Patient Portal] HIPAAtizer rejected patient email prefill:",response&&response.error?response.error:"Unknown error");}'
+                    . '});'
+                . '}'
+            . '},false);'
+            . 'function sendCommand(type,payload){'
+                . 'var frame=getIframe();'
+                . 'return new Promise(function(resolve,reject){'
+                    . 'if(!frame||!frame.contentWindow){reject(new Error("HIPAAtizer iframe not found."));return;}'
+                    . 'var requestId=String(Date.now())+Math.random().toString(16).slice(2);'
+                    . 'pending[requestId]=resolve;'
+                    . 'frame.contentWindow.postMessage({kind:"request",requestId:requestId,command:{type:type,payload:payload}},FORM_ORIGIN);'
+                    . 'setTimeout(function(){if(pending[requestId]){delete pending[requestId];reject(new Error("HIPAAtizer postMessage response timed out."));}},3000);'
+                . '});'
+            . '}'
+            . 'function waitForIframe(){'
+                . 'var tries=0;'
+                . 'var timer=setInterval(function(){'
+                    . 'tries++;'
+                    . 'if(getIframe()||tries>=40){clearInterval(timer);}'
+                . '},250);'
+            . '}'
+            . 'if(!getIframe()){waitForIframe();}'
+        . '})();</script>';
     }
 
     private function hipaatizer_prefill_values( array $form ): array {
