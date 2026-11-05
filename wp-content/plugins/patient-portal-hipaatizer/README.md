@@ -1,7 +1,6 @@
 # Patient Portal for HIPAAtizer
 
-Version 1.1.2
-
+Version 1.2.2
 A lightweight WordPress + Elementor patient portal that uses normal WordPress accounts for authentication and HIPAAtizer for patient forms.
 
 ## What this plugin stores
@@ -26,6 +25,17 @@ It deliberately does **not** save:
 - raw webhook payloads
 
 This design reduces the amount of HIPAAtizer data copied into WordPress. It does not, by itself, make the surrounding WordPress environment HIPAA compliant. Have the Covered Entity's compliance/security team review hosting, backups, administrators, logs, CDNs, email systems, vendors and BAAs before using identifiable health-related status data in production.
+
+
+## Version 1.2.2
+
+- Preserves the latest 1.1.6 frontend/postMessage implementation from the user's current plugin.
+- Adds searchable and filterable admin submission history.
+- Adds patient-specific submission filtering and pagination.
+- Adds submission detail views.
+- Stores HIPAAtizer submission, PDF, and CSV links when supplied by the webhook.
+- Adds View, PDF, and CSV access buttons when those HIPAAtizer links are available.
+- Keeps clinical form responses in HIPAAtizer rather than copying them into WordPress.
 
 ## Install
 

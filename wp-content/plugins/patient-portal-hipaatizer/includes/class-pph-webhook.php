@@ -42,11 +42,17 @@ class PPH_Webhook {
         $submission_id = $this->first_value( $payload, array( 'submission_id', 'submissionId', 'id' ) );
         $event          = $this->first_value( $payload, array( 'event', 'event_name', 'eventName', 'type' ) );
         $incoming       = $this->first_value( $payload, array( 'status', 'portal_status', 'portalStatus' ) );
+        $submission_url = $this->first_value( $payload, array( 'submission_url', 'submissionUrl', 'submission_link', 'submissionLink', 'html_url', 'htmlUrl' ) );
+        $pdf_url        = $this->first_value( $payload, array( 'pdf_url', 'pdfUrl', 'submission_pdf', 'submissionPdf', 'pdf_link', 'pdfLink' ) );
+        $csv_url        = $this->first_value( $payload, array( 'csv_url', 'csvUrl', 'submission_csv', 'submissionCsv', 'csv_link', 'csvLink' ) );
 
         $form_id       = sanitize_text_field( (string) $form_id );
         $submission_id = sanitize_text_field( (string) $submission_id );
         $event          = sanitize_key( (string) $event );
         $incoming       = sanitize_key( (string) $incoming );
+        $submission_url = esc_url_raw( (string) $submission_url );
+        $pdf_url        = esc_url_raw( (string) $pdf_url );
+        $csv_url        = esc_url_raw( (string) $csv_url );
 
         if ( '' === $form_id || '' === $submission_id ) {
             return new WP_Error(
@@ -79,6 +85,9 @@ class PPH_Webhook {
                 'status'                 => $status,
                 'event_name'             => $event,
                 'submitted_at'           => $submitted_at,
+                'submission_url'         => $submission_url,
+                'pdf_url'                => $pdf_url,
+                'csv_url'                => $csv_url,
                 'force_status'           => (bool) $reset_manual,
             )
         );

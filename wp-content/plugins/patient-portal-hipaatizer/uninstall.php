@@ -10,7 +10,9 @@ if ( empty( $settings['delete_on_uninstall'] ) ) {
 
 global $wpdb;
 $table = $wpdb->prefix . 'pph_submissions';
-$wpdb->query( "DROP TABLE IF EXISTS {$table}" ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
+$wpdb->query( "DROP TABLE IF EXISTS {$table}" );
+$contact_table = $wpdb->prefix . 'pph_contact_requests';
+$wpdb->query( "DROP TABLE IF EXISTS {$contact_table}" ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
 
 delete_option( 'pph_settings' );
 delete_option( 'pph_forms' );

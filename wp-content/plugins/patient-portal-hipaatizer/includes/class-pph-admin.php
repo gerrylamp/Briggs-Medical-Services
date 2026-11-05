@@ -11,6 +11,8 @@ class PPH_Admin {
         add_action( 'admin_post_pph_save_form', array( $this, 'save_form' ) );
         add_action( 'admin_post_pph_delete_form', array( $this, 'delete_form' ) );
         add_action( 'admin_post_pph_update_submission_status', array( $this, 'update_submission_status' ) );
+        add_action( 'admin_post_pph_delete_submission', array( $this, 'delete_submission' ) );
+        add_action( 'admin_post_pph_delete_contact_request', array( $this, 'delete_contact_request' ) );
         add_filter( 'plugin_action_links_' . plugin_basename( PPH_FILE ), array( $this, 'plugin_links' ) );
         add_filter( 'custom_menu_order', array( $this, 'custom_menu_order' ) );
         add_filter( 'menu_order', array( $this, 'menu_order' ) );
@@ -30,6 +32,7 @@ class PPH_Admin {
         add_submenu_page( 'pph-dashboard', 'Patient Portal Overview', 'Overview', 'manage_patient_portal', 'pph-dashboard', array( $this, 'dashboard_page' ) );
         add_submenu_page( 'pph-dashboard', 'Forms', 'Forms', 'manage_patient_portal', 'pph-forms', array( $this, 'forms_page' ) );
         add_submenu_page( 'pph-dashboard', 'Submissions', 'Submissions', 'manage_patient_portal', 'pph-submissions', array( $this, 'submissions_page' ) );
+        add_submenu_page( 'pph-dashboard', 'Contact Requests', 'Contact Requests', 'manage_patient_portal', 'pph-contact-requests', array( $this, 'contact_requests_page' ) );
 
         if ( current_user_can( 'manage_options' ) ) {
             add_submenu_page( 'pph-dashboard', 'Settings', 'Settings', 'manage_options', 'pph-settings', array( $this, 'settings_page' ) );
@@ -413,44 +416,208 @@ class PPH_Admin {
     }
 
     public function submissions_page(): void {
-        $rows     = PPH_DB::all();
         $statuses = PPH_DB::staff_statuses();
+
+        if ( isset( $_GET['view'] ) ) {
+            $this->submission_detail_page( absint( $_GET['view'] ) );
+            return;
+        }
+
+        $filters = array(
+            'search'   => isset( $_GET['s'] ) ? sanitize_text_field( wp_unslash( $_GET['s'] ) ) : '',
+            'user_id'  => isset( $_GET['patient'] ) ? absint( $_GET['patient'] ) : 0,
+            'form_id'  => isset( $_GET['form'] ) ? sanitize_text_field( wp_unslash( $_GET['form'] ) ) : '',
+            'status'   => isset( $_GET['status'] ) ? sanitize_key( wp_unslash( $_GET['status'] ) ) : '',
+        );
+
+        $date_from = isset( $_GET['date_from'] ) ? sanitize_text_field( wp_unslash( $_GET['date_from'] ) ) : '';
+        $date_to   = isset( $_GET['date_to'] ) ? sanitize_text_field( wp_unslash( $_GET['date_to'] ) ) : '';
+        if ( $date_from && preg_match( '/^\d{4}-\d{2}-\d{2}$/', $date_from ) ) {
+            $filters['date_from'] = get_gmt_from_date( $date_from . ' 00:00:00' );
+        }
+        if ( $date_to && preg_match( '/^\d{4}-\d{2}-\d{2}$/', $date_to ) ) {
+            $filters['date_to'] = get_gmt_from_date( $date_to . ' 23:59:59' );
+        }
+
+        $page_data = PPH_DB::filtered( $filters, 50, isset( $_GET['paged'] ) ? max( 1, absint( $_GET['paged'] ) ) : 1 );
+        $rows      = $page_data['rows'];
+        $forms     = PPH_Plugin::forms();
+        $patient_ids = PPH_DB::submission_user_ids();
+        $patients = array();
+        foreach ( $patient_ids as $patient_id ) {
+            $user = get_user_by( 'id', $patient_id );
+            if ( $user ) {
+                $patients[ $patient_id ] = $user;
+            }
+        }
+        uasort( $patients, static function( $a, $b ) {
+            return strcasecmp( $a->display_name, $b->display_name );
+        } );
+
+        $base_url = admin_url( 'admin.php?page=pph-submissions' );
+        $has_filters = (bool) array_filter( $filters ) || $date_from || $date_to;
+        $clear_url = $base_url;
         ?>
         <div class="wrap pph-standard-page">
-            <div class="pph-page-title"><div><span class="pph-eyebrow">Patient Portal</span><h1>Patient Submissions</h1><p>Review form activity and update patient-facing statuses.</p></div></div>
+            <div class="pph-page-title">
+                <div><span class="pph-eyebrow">Patient Portal</span><h1>Patient Submissions</h1><p>Search, filter, and securely access linked HIPAAtizer submissions.</p></div>
+            </div>
             <?php $this->notice(); ?>
+            <div class="pph-panel pph-submission-filters">
+                <div class="pph-panel-head"><div><h2>Find Submissions</h2><p>Use the patient filter to see one patient's complete submission history.</p></div></div>
+                <form method="get" action="<?php echo esc_url( admin_url( 'admin.php' ) ); ?>">
+                    <input type="hidden" name="page" value="pph-submissions">
+                    <div class="pph-filter-grid">
+                        <div class="pph-filter-field pph-filter-search">
+                            <label for="pph-search">Search</label>
+                            <input type="search" id="pph-search" name="s" value="<?php echo esc_attr( $filters['search'] ); ?>" placeholder="Name, email, form, or submission ID">
+                        </div>
+                        <div class="pph-filter-field">
+                            <label for="pph-patient">Patient</label>
+                            <select id="pph-patient" name="patient">
+                                <option value="">All Patients</option>
+                                <?php foreach ( $patients as $patient_id => $patient ) : ?>
+                                    <option value="<?php echo (int) $patient_id; ?>" <?php selected( $filters['user_id'], $patient_id ); ?>><?php echo esc_html( $patient->display_name . ' (' . $patient->user_email . ')' ); ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+                        <div class="pph-filter-field">
+                            <label for="pph-form">Form</label>
+                            <select id="pph-form" name="form">
+                                <option value="">All Forms</option>
+                                <?php foreach ( $forms as $form ) :
+                                    $form_id = isset( $form['hipaatizer_form_id'] ) ? (string) $form['hipaatizer_form_id'] : '';
+                                    $form_name = isset( $form['title'] ) ? (string) $form['title'] : ( isset( $form['form_name'] ) ? (string) $form['form_name'] : '' );
+                                    if ( '' === $form_id ) { continue; }
+                                    ?>
+                                    <option value="<?php echo esc_attr( $form_id ); ?>" <?php selected( $filters['form_id'], $form_id ); ?>><?php echo esc_html( $form_name ?: $form_id ); ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+                        <div class="pph-filter-field">
+                            <label for="pph-status">Status</label>
+                            <select id="pph-status" name="status">
+                                <option value="">All Statuses</option>
+                                <?php foreach ( $statuses as $value => $label ) : ?>
+                                    <option value="<?php echo esc_attr( $value ); ?>" <?php selected( $filters['status'], $value ); ?>><?php echo esc_html( $label ); ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+                        <div class="pph-filter-field">
+                            <label for="pph-date-from">From</label>
+                            <input type="date" id="pph-date-from" name="date_from" value="<?php echo esc_attr( $date_from ); ?>">
+                        </div>
+                        <div class="pph-filter-field">
+                            <label for="pph-date-to">To</label>
+                            <input type="date" id="pph-date-to" name="date_to" value="<?php echo esc_attr( $date_to ); ?>">
+                        </div>
+                    </div>
+                    <div class="pph-filter-actions">
+                        <button type="submit" class="button button-primary">Apply Filters</button>
+                        <?php if ( $has_filters ) : ?><a class="button" href="<?php echo esc_url( $clear_url ); ?>">Clear Filters</a><?php endif; ?>
+                        <span class="pph-filter-count"><?php echo esc_html( number_format_i18n( (int) $page_data['total'] ) ); ?> submission<?php echo 1 === (int) $page_data['total'] ? '' : 's'; ?></span>
+                    </div>
+                </form>
+            </div>
+
             <div class="pph-panel">
-                <div class="pph-panel-head"><div><h2>Submission History</h2><p>Clinical form content remains in HIPAAtizer; WordPress stores only portal status metadata.</p></div></div>
+                <div class="pph-panel-head"><div><h2>Submission History</h2><p>Clinical form content remains in HIPAAtizer. WordPress stores portal metadata and secure links when supplied by the HIPAAtizer webhook.</p></div></div>
                 <div class="pph-table-wrap">
-                    <table class="pph-table">
-                        <thead><tr><th>Patient Account</th><th>Form</th><th>HIPAAtizer Submission ID</th><th>Status</th><th>Last Updated</th></tr></thead>
+                    <table class="pph-table pph-submissions-table">
+                        <thead><tr><th>Patient</th><th>Form</th><th>Status</th><th>Submitted</th><th>Updated</th><th>Actions</th></tr></thead>
                         <tbody>
-                        <?php if ( ! $rows ) : ?><tr><td colspan="5">No webhook-linked submissions yet.</td></tr><?php endif; ?>
+                        <?php if ( ! $rows ) : ?><tr><td colspan="6">No submissions match the selected filters.</td></tr><?php endif; ?>
                         <?php foreach ( $rows as $row ) :
-                            $patient = get_user_by( 'id', (int) $row['user_id'] );
+                            $patient_name = ! empty( $row['display_name'] ) ? $row['display_name'] : 'Deleted WordPress user';
+                            $patient_email = ! empty( $row['user_email'] ) ? $row['user_email'] : '';
+                            $status_label = isset( $statuses[ $row['status'] ] ) ? $statuses[ $row['status'] ] : ucwords( str_replace( '_', ' ', (string) $row['status'] ) );
+                            $submitted = ! empty( $row['submitted_at'] ) ? get_date_from_gmt( $row['submitted_at'], get_option( 'date_format' ) . ' ' . get_option( 'time_format' ) ) : '—';
+                            $updated   = get_date_from_gmt( $row['updated_at'], get_option( 'date_format' ) . ' ' . get_option( 'time_format' ) );
                             ?>
                             <tr>
-                                <td><?php echo $patient ? esc_html( $patient->display_name . ' (' . $patient->user_email . ')' ) : 'Deleted WordPress user'; ?></td>
+                                <td><div class="pph-patient-cell"><span class="pph-avatar"><?php echo esc_html( strtoupper( substr( $patient_name, 0, 1 ) ) ); ?></span><div><strong><?php echo esc_html( $patient_name ); ?></strong><?php if ( $patient_email ) : ?><small><?php echo esc_html( $patient_email ); ?></small><?php endif; ?></div></div></td>
                                 <td><?php echo esc_html( $row['form_name'] ?: $row['form_id'] ); ?></td>
-                                <td><code><?php echo esc_html( $row['external_submission_id'] ); ?></code></td>
+                                <td><?php echo $this->status_badge( (string) $row['status'], (string) $status_label ); ?></td>
+                                <td><?php echo esc_html( $submitted ); ?></td>
+                                <td><?php echo esc_html( $updated ); ?></td>
                                 <td>
-                                    <form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" class="pph-status-form">
-                                        <input type="hidden" name="action" value="pph_update_submission_status">
-                                        <input type="hidden" name="id" value="<?php echo (int) $row['id']; ?>">
-                                        <?php wp_nonce_field( 'pph_update_status_' . (int) $row['id'], 'pph_nonce' ); ?>
-                                        <select name="status">
-                                            <?php foreach ( $statuses as $value => $label ) : ?><option value="<?php echo esc_attr( $value ); ?>" <?php selected( $row['status'], $value ); ?>><?php echo esc_html( $label ); ?></option><?php endforeach; ?>
-                                        </select>
-                                        <button class="button button-small" type="submit">Save</button>
-                                    </form>
-                                    <?php if ( ! empty( $row['manual_override'] ) ) : ?><small>Manual override</small><?php endif; ?>
+                                    <div class="pph-submission-actions">
+                                        <a class="button button-small" href="<?php echo esc_url( add_query_arg( array( 'page' => 'pph-submissions', 'view' => (int) $row['id'] ), admin_url( 'admin.php' ) ) ); ?>">View</a>
+                                        <?php if ( ! empty( $row['pdf_url'] ) ) : ?><a class="button button-small" href="<?php echo esc_url( $row['pdf_url'] ); ?>" target="_blank" rel="noopener">PDF</a><?php endif; ?>
+                                        <form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" style="display:inline;" onsubmit="return confirm('Delete this WordPress submission record? The original submission in HIPAAtizer will not be deleted.');">
+                                            <input type="hidden" name="action" value="pph_delete_submission">
+                                            <input type="hidden" name="id" value="<?php echo (int) $row['id']; ?>">
+                                            <?php wp_nonce_field( 'pph_delete_submission_' . (int) $row['id'], 'pph_nonce' ); ?>
+                                            <button type="submit" class="button button-small pph-delete-button">Delete</button>
+                                        </form>
+                                    </div>
                                 </td>
-                                <td><?php echo esc_html( get_date_from_gmt( $row['updated_at'], get_option( 'date_format' ) . ' ' . get_option( 'time_format' ) ) ); ?></td>
                             </tr>
                         <?php endforeach; ?>
                         </tbody>
                     </table>
                 </div>
+                <?php if ( (int) $page_data['total_pages'] > 1 ) :
+                    $pagination_args = array( 'page' => 'pph-submissions', 'paged' => '%#%' );
+                    foreach ( array( 's', 'patient', 'form', 'status', 'date_from', 'date_to' ) as $key ) {
+                        if ( isset( $_GET[ $key ] ) && '' !== (string) $_GET[ $key ] ) { $pagination_args[ $key ] = sanitize_text_field( wp_unslash( $_GET[ $key ] ) ); }
+                    }
+                    ?>
+                    <div class="pph-pagination"><?php echo wp_kses_post( paginate_links( array( 'base' => add_query_arg( $pagination_args, admin_url( 'admin.php' ) ), 'format' => '', 'current' => (int) $page_data['page'], 'total' => (int) $page_data['total_pages'], 'prev_text' => '← Previous', 'next_text' => 'Next →', 'type' => 'plain' ) ) ); ?></div>
+                <?php endif; ?>
+            </div>
+        </div>
+        <?php
+    }
+
+    private function submission_detail_page( int $id ): void {
+        global $wpdb;
+        $row = $wpdb->get_row( $wpdb->prepare( 'SELECT * FROM ' . PPH_DB::table() . ' WHERE id = %d LIMIT 1', $id ), ARRAY_A );
+        if ( ! $row ) {
+            wp_die( esc_html__( 'Submission not found.', 'patient-portal-hipaatizer' ) );
+        }
+        $patient = get_user_by( 'id', (int) $row['user_id'] );
+        $statuses = PPH_DB::staff_statuses();
+        $status_label = isset( $statuses[ $row['status'] ] ) ? $statuses[ $row['status'] ] : ucwords( str_replace( '_', ' ', (string) $row['status'] ) );
+        $back_url = admin_url( 'admin.php?page=pph-submissions' );
+        ?>
+        <div class="wrap pph-standard-page">
+            <div class="pph-page-title"><div><span class="pph-eyebrow">Patient Portal</span><h1>Submission Details</h1><p><?php echo esc_html( $row['form_name'] ?: $row['form_id'] ); ?></p></div><a class="button" href="<?php echo esc_url( $back_url ); ?>">← Back to Submissions</a></div>
+            <div class="pph-panel">
+                <div class="pph-detail-grid">
+                    <div><span>Patient</span><strong><?php echo esc_html( $patient ? $patient->display_name : 'Deleted WordPress user' ); ?></strong></div>
+                    <div><span>Email</span><strong><?php echo esc_html( $patient ? $patient->user_email : '—' ); ?></strong></div>
+                    <div><span>Form</span><strong><?php echo esc_html( $row['form_name'] ?: $row['form_id'] ); ?></strong></div>
+                    <div><span>Status</span><strong><?php echo $this->status_badge( (string) $row['status'], (string) $status_label ); ?></strong></div>
+                    <div><span>Submitted</span><strong><?php echo esc_html( ! empty( $row['submitted_at'] ) ? get_date_from_gmt( $row['submitted_at'], get_option( 'date_format' ) . ' ' . get_option( 'time_format' ) ) : '—' ); ?></strong></div>
+                    <div><span>Last Updated</span><strong><?php echo esc_html( get_date_from_gmt( $row['updated_at'], get_option( 'date_format' ) . ' ' . get_option( 'time_format' ) ) ); ?></strong></div>
+                </div>
+            </div>
+            <div class="pph-panel">
+                <div class="pph-panel-head"><div><h2>Submission Access</h2><p>The clinical response itself remains in HIPAAtizer. These links are provided only when HIPAAtizer sends them through the configured webhook.</p></div></div>
+                <div class="pph-detail-actions">
+                    <?php if ( ! empty( $row['submission_url'] ) ) : ?><a class="pph-btn pph-btn-primary" href="<?php echo esc_url( $row['submission_url'] ); ?>" target="_blank" rel="noopener"><span class="dashicons dashicons-visibility"></span> View in HIPAAtizer</a><?php endif; ?>
+                    <?php if ( ! empty( $row['pdf_url'] ) ) : ?><a class="pph-btn pph-btn-secondary" href="<?php echo esc_url( $row['pdf_url'] ); ?>" target="_blank" rel="noopener"><span class="dashicons dashicons-pdf"></span> Download PDF</a><?php endif; ?>
+                    <?php if ( ! empty( $row['csv_url'] ) ) : ?><a class="pph-btn pph-btn-secondary" href="<?php echo esc_url( $row['csv_url'] ); ?>" target="_blank" rel="noopener"><span class="dashicons dashicons-media-spreadsheet"></span> Download CSV</a><?php endif; ?>
+                    <?php if ( empty( $row['submission_url'] ) && empty( $row['pdf_url'] ) && empty( $row['csv_url'] ) ) : ?><div class="pph-empty">No HIPAAtizer access links are stored for this submission yet. Configure the HIPAAtizer webhook to send the submission URL and PDF link for new submissions.</div><?php endif; ?>
+                </div>
+            </div>
+            <div class="pph-panel">
+                <div class="pph-panel-head"><div><h2>Submission Record</h2><p>Deleting this record removes it from the WordPress Patient Portal only. The original clinical submission in HIPAAtizer is not deleted.</p></div></div>
+                <form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" onsubmit="return confirm('Delete this WordPress submission record? The original submission in HIPAAtizer will not be deleted.');">
+                    <input type="hidden" name="action" value="pph_delete_submission">
+                    <input type="hidden" name="id" value="<?php echo (int) $row['id']; ?>">
+                    <?php wp_nonce_field( 'pph_delete_submission_' . (int) $row['id'], 'pph_nonce' ); ?>
+                    <button type="submit" class="button pph-delete-button">Delete Submission Record</button>
+                </form>
+            </div>
+            <div class="pph-panel">
+                <div class="pph-panel-head"><div><h2>Technical Details</h2><p>Useful for support and troubleshooting.</p></div></div>
+                <dl class="pph-detail-list">
+                    <div><dt>HIPAAtizer Submission ID</dt><dd><code><?php echo esc_html( $row['external_submission_id'] ); ?></code></dd></div>
+                    <div><dt>HIPAAtizer Form ID</dt><dd><code><?php echo esc_html( $row['form_id'] ); ?></code></dd></div>
+                    <div><dt>Webhook Event</dt><dd><?php echo esc_html( $row['event_name'] ?: '—' ); ?></dd></div>
+                </dl>
             </div>
         </div>
         <?php
@@ -634,6 +801,117 @@ class PPH_Admin {
         $this->redirect( 'pph-forms', 'deleted' );
     }
 
+
+    /** Display public Patient Portal contact requests. */
+    public function contact_requests_page(): void {
+        if ( ! current_user_can( 'manage_patient_portal' ) ) {
+            wp_die( esc_html__( 'You do not have permission to view contact requests.', 'patient-portal-hipaatizer' ) );
+        }
+        $filters = array(
+            'search'    => isset( $_GET['s'] ) ? sanitize_text_field( wp_unslash( $_GET['s'] ) ) : '',
+            'service'   => isset( $_GET['service'] ) ? sanitize_text_field( wp_unslash( $_GET['service'] ) ) : '',
+            'date_from' => isset( $_GET['date_from'] ) ? sanitize_text_field( wp_unslash( $_GET['date_from'] ) ) : '',
+            'date_to'   => isset( $_GET['date_to'] ) ? sanitize_text_field( wp_unslash( $_GET['date_to'] ) ) : '',
+        );
+        $requests = PPH_DB::get_contact_requests( 200, $filters );
+        $services = PPH_DB::get_contact_request_services();
+        ?>
+        <div class="wrap pph-admin-wrap">
+            <h1><?php esc_html_e( 'Patient Portal Contact Requests', 'patient-portal-hipaatizer' ); ?></h1>
+            <p><?php esc_html_e( 'Requests submitted through the “Let us know below, and we’ll get in contact with you” form. The list shows the latest 200 requests.', 'patient-portal-hipaatizer' ); ?></p>
+            <?php if ( isset( $_GET['deleted'] ) && '1' === sanitize_text_field( wp_unslash( $_GET['deleted'] ) ) ) : ?>
+                <div class="notice notice-success is-dismissible"><p><?php esc_html_e( 'Contact request deleted.', 'patient-portal-hipaatizer' ); ?></p></div>
+            <?php endif; ?>
+            <form method="get" action="<?php echo esc_url( admin_url( 'admin.php' ) ); ?>" style="margin: 16px 0; padding: 12px; background: #fff; border: 1px solid #c3c4c7; display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px;">
+                <input type="hidden" name="page" value="pph-contact-requests">
+                <div>
+                    <label for="pph-contact-search"><strong><?php esc_html_e( 'Search', 'patient-portal-hipaatizer' ); ?></strong></label><br>
+                    <input id="pph-contact-search" type="search" name="s" value="<?php echo esc_attr( $filters['search'] ); ?>" placeholder="<?php esc_attr_e( 'Name, email, or phone', 'patient-portal-hipaatizer' ); ?>">
+                </div>
+                <div>
+                    <label for="pph-contact-service"><strong><?php esc_html_e( 'Requested service', 'patient-portal-hipaatizer' ); ?></strong></label><br>
+                    <select id="pph-contact-service" name="service">
+                        <option value=""><?php esc_html_e( 'All services', 'patient-portal-hipaatizer' ); ?></option>
+                        <?php foreach ( $services as $service_option ) : ?>
+                            <option value="<?php echo esc_attr( $service_option ); ?>" <?php selected( $filters['service'], $service_option ); ?>><?php echo esc_html( $service_option ); ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+                <div>
+                    <label for="pph-contact-date-from"><strong><?php esc_html_e( 'From date', 'patient-portal-hipaatizer' ); ?></strong></label><br>
+                    <input id="pph-contact-date-from" type="date" name="date_from" value="<?php echo esc_attr( $filters['date_from'] ); ?>">
+                </div>
+                <div>
+                    <label for="pph-contact-date-to"><strong><?php esc_html_e( 'To date', 'patient-portal-hipaatizer' ); ?></strong></label><br>
+                    <input id="pph-contact-date-to" type="date" name="date_to" value="<?php echo esc_attr( $filters['date_to'] ); ?>">
+                </div>
+                <?php submit_button( __( 'Filter', 'patient-portal-hipaatizer' ), 'primary', 'filter_action', false ); ?>
+                <a class="button" href="<?php echo esc_url( admin_url( 'admin.php?page=pph-contact-requests' ) ); ?>"><?php esc_html_e( 'Reset', 'patient-portal-hipaatizer' ); ?></a>
+            </form>
+            <p><?php echo esc_html( sprintf( __( 'Showing %d matching contact requests (maximum 200).', 'patient-portal-hipaatizer' ), count( $requests ) ) ); ?></p>
+            <table class="widefat striped">
+                <thead><tr>
+                    <th><?php esc_html_e( 'Submitted', 'patient-portal-hipaatizer' ); ?></th>
+                    <th><?php esc_html_e( 'Name', 'patient-portal-hipaatizer' ); ?></th>
+                    <th><?php esc_html_e( 'Email', 'patient-portal-hipaatizer' ); ?></th>
+                    <th><?php esc_html_e( 'Phone', 'patient-portal-hipaatizer' ); ?></th>
+                    <th><?php esc_html_e( 'Requested service', 'patient-portal-hipaatizer' ); ?></th>
+                    <th><?php esc_html_e( 'Action', 'patient-portal-hipaatizer' ); ?></th>
+                </tr></thead>
+                <tbody>
+                <?php if ( empty( $requests ) ) : ?>
+                    <tr><td colspan="6"><?php esc_html_e( 'No contact requests have been received yet.', 'patient-portal-hipaatizer' ); ?></td></tr>
+                <?php else : foreach ( $requests as $request ) : ?>
+                    <tr>
+                        <td><?php echo esc_html( mysql2date( get_option( 'date_format' ) . ' ' . get_option( 'time_format' ), $request['submitted_at'] ) ); ?></td>
+                        <td><?php echo esc_html( $request['first_name'] . ' ' . $request['last_name'] ); ?></td>
+                        <td><a href="<?php echo esc_url( 'mailto:' . $request['email'] ); ?>"><?php echo esc_html( $request['email'] ); ?></a></td>
+                        <td><?php echo esc_html( $request['phone'] ); ?></td>
+                        <td><?php echo esc_html( $request['service'] ); ?></td>
+                        <td>
+                            <form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" onsubmit="return confirm('<?php echo esc_js( __( 'Delete this contact request? This cannot be undone.', 'patient-portal-hipaatizer' ) ); ?>');">
+                                <input type="hidden" name="action" value="pph_delete_contact_request">
+                                <input type="hidden" name="id" value="<?php echo esc_attr( (string) $request['id'] ); ?>">
+                                <?php wp_nonce_field( 'pph_delete_contact_request_' . (int) $request['id'], 'pph_nonce' ); ?>
+                                <?php submit_button( __( 'Delete', 'patient-portal-hipaatizer' ), 'delete small', 'submit', false ); ?>
+                            </form>
+                        </td>
+                    </tr>
+                <?php endforeach; endif; ?>
+                </tbody>
+            </table>
+        </div>
+        <?php
+    }
+
+    public function delete_contact_request(): void {
+        if ( ! current_user_can( 'manage_patient_portal' ) ) {
+            wp_die( esc_html__( 'You do not have permission to do that.', 'patient-portal-hipaatizer' ) );
+        }
+        $id = isset( $_POST['id'] ) ? absint( $_POST['id'] ) : 0;
+        check_admin_referer( 'pph_delete_contact_request_' . $id, 'pph_nonce' );
+        if ( ! $id || ! PPH_DB::delete_contact_request( $id ) ) {
+            wp_die( esc_html__( 'Unable to delete the contact request.', 'patient-portal-hipaatizer' ) );
+        }
+        wp_safe_redirect( add_query_arg( array( 'page' => 'pph-contact-requests', 'deleted' => '1' ), admin_url( 'admin.php' ) ) );
+        exit;
+    }
+
+    public function delete_submission(): void {
+        if ( ! current_user_can( 'manage_patient_portal' ) ) {
+            wp_die( esc_html__( 'You do not have permission to do that.', 'patient-portal-hipaatizer' ) );
+        }
+
+        $id = isset( $_POST['id'] ) ? absint( $_POST['id'] ) : 0;
+        check_admin_referer( 'pph_delete_submission_' . $id, 'pph_nonce' );
+
+        if ( ! $id || ! PPH_DB::delete_submission( $id ) ) {
+            $this->redirect( 'pph-submissions', 'error' );
+        }
+
+        $this->redirect( 'pph-submissions', 'submission_deleted' );
+    }
+
     public function update_submission_status(): void {
         if ( ! current_user_can( 'manage_patient_portal' ) ) {
             wp_die( esc_html__( 'You do not have permission to do that.', 'patient-portal-hipaatizer' ) );
@@ -667,7 +945,7 @@ class PPH_Admin {
         if ( ! $notice ) {
             return;
         }
-        $messages = array( 'saved' => 'Saved successfully.', 'deleted' => 'Deleted successfully.', 'error' => 'Please check the required values and try again.' );
+        $messages = array( 'saved' => 'Saved successfully.', 'deleted' => 'Deleted successfully.', 'submission_deleted' => 'Submission record deleted successfully. The HIPAAtizer submission was not deleted.', 'error' => 'Please check the required values and try again.' );
         if ( isset( $messages[ $notice ] ) ) {
             echo '<div class="notice ' . ( 'error' === $notice ? 'notice-error' : 'notice-success' ) . ' is-dismissible"><p>' . esc_html( $messages[ $notice ] ) . '</p></div>';
         }

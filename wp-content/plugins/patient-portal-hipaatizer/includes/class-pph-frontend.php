@@ -6,6 +6,8 @@ if ( ! defined( 'ABSPATH' ) ) {
 class PPH_Frontend {
     public function __construct() {
         add_action( 'wp_enqueue_scripts', array( $this, 'register_assets' ) );
+        add_action( 'admin_post_nopriv_pph_inperson_contact', array( $this, 'handle_inperson_contact' ) );
+        add_action( 'admin_post_pph_inperson_contact', array( $this, 'handle_inperson_contact' ) );
         add_action( 'admin_post_nopriv_pph_login', array( $this, 'handle_login' ) );
         add_action( 'admin_post_pph_login', array( $this, 'handle_login' ) );
         add_action( 'admin_post_nopriv_pph_register', array( $this, 'handle_register' ) );
@@ -36,6 +38,74 @@ class PPH_Frontend {
         $settings = PPH_Plugin::settings();
         $accent   = sanitize_hex_color( (string) $settings['accent_color'] ) ?: '#2563eb';
         wp_add_inline_style( 'pph-portal', ':root{--pph-accent:' . esc_attr( $accent ) . ';}' );
+    }
+
+    /**
+     * Process the public in-person service request and notify the site administrator.
+     * Only contact details and the requested service are emailed; no clinical answers are collected here.
+     */
+    public function handle_inperson_contact(): void {
+        if (
+            ! isset( $_POST['pph_inperson_nonce'] ) ||
+            ! wp_verify_nonce( sanitize_text_field( wp_unslash( $_POST['pph_inperson_nonce'] ) ), 'pph_inperson_contact' )
+        ) {
+            $this->redirect_contact_result( 'failed' );
+        }
+
+        $first_name = isset( $_POST['first_name'] ) ? sanitize_text_field( wp_unslash( $_POST['first_name'] ) ) : '';
+        $last_name  = isset( $_POST['last_name'] ) ? sanitize_text_field( wp_unslash( $_POST['last_name'] ) ) : '';
+        $email      = isset( $_POST['email'] ) ? sanitize_email( wp_unslash( $_POST['email'] ) ) : '';
+        $phone      = isset( $_POST['phone'] ) ? sanitize_text_field( wp_unslash( $_POST['phone'] ) ) : '';
+        $service    = isset( $_POST['service'] ) ? sanitize_text_field( wp_unslash( $_POST['service'] ) ) : '';
+
+        $allowed_services = array(
+            'Phlebotomy Services',
+            'Corporate and Facility Services',
+            'Drug and Alcohol Testing',
+            'IV Hydration and Wellness Treatments',
+            'Gender Reveal and DNA Testing',
+            'Immigration Vaccination Services',
+        );
+
+        if ( '' === $first_name || '' === $last_name || ! is_email( $email ) || '' === $phone || ! in_array( $service, $allowed_services, true ) ) {
+            $this->redirect_contact_result( 'failed' );
+        }
+
+        // Save the contact request for authorized staff before attempting email delivery.
+        // This ensures requests remain available in WordPress even if mail delivery fails.
+        PPH_DB::save_contact_request( array(
+            'first_name' => $first_name,
+            'last_name'  => $last_name,
+            'email'      => $email,
+            'phone'      => $phone,
+            'service'    => $service,
+        ) );
+
+        $admin_email = sanitize_email( (string) get_option( 'admin_email' ) );
+        $subject     = 'New in-person service request';
+        $message     = "A new in-person service request was submitted on the website.\n\n"
+            . 'Name: ' . $first_name . ' ' . $last_name . "\n"
+            . 'Email: ' . $email . "\n"
+            . 'Phone: ' . $phone . "\n"
+            . 'Requested service: ' . $service . "\n";
+        $headers = array( 'Reply-To: ' . $first_name . ' ' . $last_name . ' <' . $email . '>' );
+
+        if ( ! $admin_email || ! wp_mail( $admin_email, $subject, $message, $headers ) ) {
+            $this->redirect_contact_result( 'failed' );
+        }
+
+        $this->redirect_contact_result( 'success' );
+    }
+
+    /** Redirect back to the page containing the in-person request form. */
+    private function redirect_contact_result( string $result ): void {
+        $redirect = wp_get_referer();
+        if ( ! $redirect ) {
+            $redirect = PPH_Plugin::portal_url();
+        }
+        $redirect = remove_query_arg( 'pph_contact', $redirect );
+        wp_safe_redirect( add_query_arg( 'pph_contact', $result, $redirect ) );
+        exit;
     }
 
     public function handle_login(): void {
@@ -478,7 +548,7 @@ class PPH_Frontend {
                         <h3>Access your service forms online</h3>
                         <img
                             class="pph-choice-image"
-                            src="/wp-content/uploads/2026/09/87117b39-2439-42c7-b678-a3212d755b81.webp"
+                            src="/wp-content/uploads/2026/10/07bed35c-409b-4999-a98c-30ec3d4f1385.webp"
                             alt="Patient completing medical forms online"
                         >
                         <p class="pph-choice-text">Select the service form you need to complete.</p>
@@ -495,11 +565,13 @@ class PPH_Frontend {
                         <h3>Prefer to fill out your service forms in person?</h3>
                         <img
                             class="pph-choice-image"
-                            src="/wp-content/uploads/2026/09/f8eec8eb-8294-4410-be19-8c1d9a1fb80f.webp"
+                            src="/wp-content/uploads/2026/10/d06e78d1-c2e8-401d-97e4-2868d8e0f410.webp"
                             alt="Patient speaking with medical office staff"
                         >
                         <p class="pph-choice-text">Let us know below, and we'll get in contact with you.</p>
-                        <form class="pph-form pph-contact-form" method="post" action="">
+                        <form class="pph-form pph-contact-form" method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
+                            <input type="hidden" name="action" value="pph_inperson_contact">
+                            <?php wp_nonce_field( 'pph_inperson_contact', 'pph_inperson_nonce' ); ?>
                             <div class="pph-two-col">
                                 <label><span>First Name</span><input type="text" name="first_name" autocomplete="given-name" required></label>
                                 <label><span>Last Name</span><input type="text" name="last_name" autocomplete="family-name" required></label>
@@ -564,6 +636,63 @@ class PPH_Frontend {
                 <?php echo $this->render_status_table(); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?>
             </div>
         </div>
+        <?php if ( isset( $_GET['pph_contact'] ) ) : ?>
+            <?php $contact_result = sanitize_key( wp_unslash( $_GET['pph_contact'] ) ); ?>
+            <?php if ( in_array( $contact_result, array( 'success', 'failed' ), true ) ) : ?>
+                <div class="pph-feedback-overlay" data-pph-feedback-overlay role="presentation">
+                    <section class="pph-feedback-modal" role="dialog" aria-modal="true" aria-labelledby="pph-feedback-title" aria-describedby="pph-feedback-description" tabindex="-1">
+                        <button class="pph-feedback-close" type="button" aria-label="Close confirmation" data-pph-feedback-close>&times;</button>
+                        <?php if ( 'success' === $contact_result ) : ?>
+                            <div class="pph-feedback-icon pph-feedback-icon-success" aria-hidden="true">
+                                <svg viewBox="0 0 24 24" focusable="false"><path d="M5 12.5l4.2 4.2L19 7" /></svg>
+                            </div>
+                            <h2 id="pph-feedback-title">We received your submission</h2>
+                            <p id="pph-feedback-description">Thank you for contacting Briggs Medical Services. Our team has received your request and will be in touch.</p>
+                            <button class="pph-button pph-feedback-primary" type="button" data-pph-feedback-close>Close</button>
+                        <?php else : ?>
+                            <div class="pph-feedback-icon pph-feedback-icon-error" aria-hidden="true">!</div>
+                            <h2 id="pph-feedback-title">We couldn't send your request</h2>
+                            <p id="pph-feedback-description">Please check your details and try again. If the problem continues, contact our office directly.</p>
+                            <button class="pph-button pph-feedback-primary" type="button" data-pph-feedback-close>Close</button>
+                        <?php endif; ?>
+                    </section>
+                </div>
+                <script>
+                (function () {
+                    var overlay = document.querySelector('[data-pph-feedback-overlay]');
+                    if (!overlay) return;
+                    var modal = overlay.querySelector('.pph-feedback-modal');
+                    var closeButtons = overlay.querySelectorAll('[data-pph-feedback-close]');
+                    var previousFocus = document.activeElement;
+                    function closeModal() {
+                        overlay.classList.add('pph-feedback-is-closing');
+                        document.body.classList.remove('pph-feedback-open');
+                        window.setTimeout(function () {
+                            if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+                            if (previousFocus && typeof previousFocus.focus === 'function') previousFocus.focus();
+                        }, 160);
+                    }
+                    closeButtons.forEach(function (button) { button.addEventListener('click', closeModal); });
+                    overlay.addEventListener('click', function (event) {
+                        if (event.target === overlay) closeModal();
+                    });
+                    document.addEventListener('keydown', function onKeydown(event) {
+                        if (event.key === 'Escape' && document.body.contains(overlay)) {
+                            closeModal();
+                            document.removeEventListener('keydown', onKeydown);
+                        }
+                    });
+                    document.body.classList.add('pph-feedback-open');
+                    if (modal) modal.focus();
+                    if (window.history && window.history.replaceState) {
+                        var cleanUrl = new URL(window.location.href);
+                        cleanUrl.searchParams.delete('pph_contact');
+                        window.history.replaceState({}, document.title, cleanUrl.toString());
+                    }
+                }());
+                </script>
+            <?php endif; ?>
+        <?php endif; ?>
         <?php
         return (string) ob_get_clean();
     }
@@ -582,7 +711,7 @@ class PPH_Frontend {
 
                     <img
                         class="pph-choice-image"
-                        src="/wp-content/uploads/2026/09/87117b39-2439-42c7-b678-a3212d755b81.webp"
+                        src="/wp-content/uploads/2026/10/07bed35c-409b-4999-a98c-30ec3d4f1385.webp"
                         alt="Patient completing medical forms online"
                     >
 
@@ -601,7 +730,7 @@ class PPH_Frontend {
 
                     <img
                         class="pph-choice-image"
-                        src="/wp-content/uploads/2026/09/f8eec8eb-8294-4410-be19-8c1d9a1fb80f.webp"
+                        src="/wp-content/uploads/2026/10/d06e78d1-c2e8-401d-97e4-2868d8e0f410.webp"
                         alt="Patient speaking with medical office staff"
                     >
 
@@ -612,8 +741,10 @@ class PPH_Frontend {
                     <form
                         class="pph-form pph-contact-form"
                         method="post"
-                        action=""
+                        action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>"
                     >
+                        <input type="hidden" name="action" value="pph_inperson_contact">
+                        <?php wp_nonce_field( 'pph_inperson_contact', 'pph_inperson_nonce' ); ?>
                         <div class="pph-two-col">
                             <label>
                                 <span>First Name</span>
@@ -653,6 +784,63 @@ class PPH_Frontend {
                 </section>
             </div>
         </div>
+        <?php if ( isset( $_GET['pph_contact'] ) ) : ?>
+            <?php $contact_result = sanitize_key( wp_unslash( $_GET['pph_contact'] ) ); ?>
+            <?php if ( in_array( $contact_result, array( 'success', 'failed' ), true ) ) : ?>
+                <div class="pph-feedback-overlay" data-pph-feedback-overlay role="presentation">
+                    <section class="pph-feedback-modal" role="dialog" aria-modal="true" aria-labelledby="pph-feedback-title" aria-describedby="pph-feedback-description" tabindex="-1">
+                        <button class="pph-feedback-close" type="button" aria-label="Close confirmation" data-pph-feedback-close>&times;</button>
+                        <?php if ( 'success' === $contact_result ) : ?>
+                            <div class="pph-feedback-icon pph-feedback-icon-success" aria-hidden="true">
+                                <svg viewBox="0 0 24 24" focusable="false"><path d="M5 12.5l4.2 4.2L19 7" /></svg>
+                            </div>
+                            <h2 id="pph-feedback-title">We received your submission</h2>
+                            <p id="pph-feedback-description">Thank you for contacting Briggs Medical Services. Our team has received your request and will be in touch.</p>
+                            <button class="pph-button pph-feedback-primary" type="button" data-pph-feedback-close>Close</button>
+                        <?php else : ?>
+                            <div class="pph-feedback-icon pph-feedback-icon-error" aria-hidden="true">!</div>
+                            <h2 id="pph-feedback-title">We couldn't send your request</h2>
+                            <p id="pph-feedback-description">Please check your details and try again. If the problem continues, contact our office directly.</p>
+                            <button class="pph-button pph-feedback-primary" type="button" data-pph-feedback-close>Close</button>
+                        <?php endif; ?>
+                    </section>
+                </div>
+                <script>
+                (function () {
+                    var overlay = document.querySelector('[data-pph-feedback-overlay]');
+                    if (!overlay) return;
+                    var modal = overlay.querySelector('.pph-feedback-modal');
+                    var closeButtons = overlay.querySelectorAll('[data-pph-feedback-close]');
+                    var previousFocus = document.activeElement;
+                    function closeModal() {
+                        overlay.classList.add('pph-feedback-is-closing');
+                        document.body.classList.remove('pph-feedback-open');
+                        window.setTimeout(function () {
+                            if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+                            if (previousFocus && typeof previousFocus.focus === 'function') previousFocus.focus();
+                        }, 160);
+                    }
+                    closeButtons.forEach(function (button) { button.addEventListener('click', closeModal); });
+                    overlay.addEventListener('click', function (event) {
+                        if (event.target === overlay) closeModal();
+                    });
+                    document.addEventListener('keydown', function onKeydown(event) {
+                        if (event.key === 'Escape' && document.body.contains(overlay)) {
+                            closeModal();
+                            document.removeEventListener('keydown', onKeydown);
+                        }
+                    });
+                    document.body.classList.add('pph-feedback-open');
+                    if (modal) modal.focus();
+                    if (window.history && window.history.replaceState) {
+                        var cleanUrl = new URL(window.location.href);
+                        cleanUrl.searchParams.delete('pph_contact');
+                        window.history.replaceState({}, document.title, cleanUrl.toString());
+                    }
+                }());
+                </script>
+            <?php endif; ?>
+        <?php endif; ?>
         <?php
         return (string) ob_get_clean();
     }
