@@ -13,6 +13,7 @@ class PPH_Admin {
         add_action( 'admin_post_pph_update_submission_status', array( $this, 'update_submission_status' ) );
         add_action( 'admin_post_pph_delete_submission', array( $this, 'delete_submission' ) );
         add_action( 'admin_post_pph_delete_contact_request', array( $this, 'delete_contact_request' ) );
+        add_action( 'admin_post_pph_export_payments', array( $this, 'export_payments_csv' ) );
         add_filter( 'plugin_action_links_' . plugin_basename( PPH_FILE ), array( $this, 'plugin_links' ) );
         add_filter( 'custom_menu_order', array( $this, 'custom_menu_order' ) );
         add_filter( 'menu_order', array( $this, 'menu_order' ) );
@@ -33,6 +34,7 @@ class PPH_Admin {
         add_submenu_page( 'pph-dashboard', 'Forms', 'Forms', 'manage_patient_portal', 'pph-forms', array( $this, 'forms_page' ) );
         add_submenu_page( 'pph-dashboard', 'Submissions', 'Submissions', 'manage_patient_portal', 'pph-submissions', array( $this, 'submissions_page' ) );
         add_submenu_page( 'pph-dashboard', 'Contact Requests', 'Contact Requests', 'manage_patient_portal', 'pph-contact-requests', array( $this, 'contact_requests_page' ) );
+        add_submenu_page( 'pph-dashboard', 'Payments', 'Payments', 'manage_patient_portal', 'pph-payments', array( $this, 'payments_page' ) );
 
         if ( current_user_can( 'manage_options' ) ) {
             add_submenu_page( 'pph-dashboard', 'Settings', 'Settings', 'manage_options', 'pph-settings', array( $this, 'settings_page' ) );
@@ -91,6 +93,189 @@ class PPH_Admin {
         $label = current_user_can( 'manage_options' ) ? 'Settings' : 'Overview';
         array_unshift( $links, '<a href="' . esc_url( $url ) . '">' . esc_html( $label ) . '</a>' );
         return $links;
+    }
+
+
+    /**
+     * Return the Training/Education payment records with safe admin filters.
+     * HIPAAtizer transactions are intentionally not included until its Stripe
+     * connection can be verified and an authorized event source is available.
+     */
+    private function get_training_payment_records( array $filters = array(), int $limit = 100, int $offset = 0 ): array {
+        global $wpdb;
+        $table = $wpdb->prefix . 'briggs_stripe_payments';
+        $exists = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $table ) ) );
+        if ( $exists !== $table ) {
+            return array();
+        }
+
+        $where  = array( 'source = %s' );
+        $params = array( 'training_education' );
+
+        if ( ! empty( $filters['status'] ) && in_array( $filters['status'], array( 'paid', 'pending', 'expired' ), true ) ) {
+            $where[]  = 'status = %s';
+            $params[] = $filters['status'];
+        }
+        if ( ! empty( $filters['search'] ) ) {
+            $like = '%' . $wpdb->esc_like( $filters['search'] ) . '%';
+            $where[] = '(customer_name LIKE %s OR customer_email LIKE %s OR session_id LIKE %s OR payment_intent_id LIKE %s)';
+            array_push( $params, $like, $like, $like, $like );
+        }
+        if ( ! empty( $filters['date_from'] ) && preg_match( '/^\d{4}-\d{2}-\d{2}$/', $filters['date_from'] ) ) {
+            $where[]  = 'created_at >= %s';
+            $params[] = $filters['date_from'] . ' 00:00:00';
+        }
+        if ( ! empty( $filters['date_to'] ) && preg_match( '/^\d{4}-\d{2}-\d{2}$/', $filters['date_to'] ) ) {
+            $where[]  = 'created_at <= %s';
+            $params[] = $filters['date_to'] . ' 23:59:59';
+        }
+
+        $sql = 'SELECT * FROM ' . $table . ' WHERE ' . implode( ' AND ', $where ) . ' ORDER BY created_at DESC, id DESC';
+        if ( $limit > 0 ) {
+            $sql .= ' LIMIT %d OFFSET %d';
+            $params[] = $limit;
+            $params[] = max( 0, $offset );
+        }
+        return $wpdb->get_results( $wpdb->prepare( $sql, $params ), ARRAY_A ) ?: array();
+    }
+
+    private function get_training_payment_totals(): array {
+        global $wpdb;
+        $table = $wpdb->prefix . 'briggs_stripe_payments';
+        $exists = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $wpdb->esc_like( $table ) ) );
+        if ( $exists !== $table ) {
+            return array( 'count' => 0, 'paid_count' => 0, 'paid_cents' => 0, 'pending_count' => 0, 'expired_count' => 0 );
+        }
+        $row = $wpdb->get_row( "SELECT COUNT(*) AS total_count,
+            SUM(status = 'paid') AS paid_count,
+            SUM(CASE WHEN status = 'paid' THEN amount_cents ELSE 0 END) AS paid_cents,
+            SUM(status = 'pending') AS pending_count,
+            SUM(status = 'expired') AS expired_count
+            FROM {$table} WHERE source = 'training_education'", ARRAY_A );
+        return array(
+            'count' => (int) ( $row['total_count'] ?? 0 ),
+            'paid_count' => (int) ( $row['paid_count'] ?? 0 ),
+            'paid_cents' => (int) ( $row['paid_cents'] ?? 0 ),
+            'pending_count' => (int) ( $row['pending_count'] ?? 0 ),
+            'expired_count' => (int) ( $row['expired_count'] ?? 0 ),
+        );
+    }
+
+    public function payments_page(): void {
+        if ( ! current_user_can( 'manage_patient_portal' ) ) {
+            wp_die( esc_html__( 'You are not allowed to view payment records.', 'patient-portal-hipaatizer' ) );
+        }
+
+        $filters = array(
+            'search'    => isset( $_GET['s'] ) ? sanitize_text_field( wp_unslash( $_GET['s'] ) ) : '',
+            'status'    => isset( $_GET['status'] ) ? sanitize_key( wp_unslash( $_GET['status'] ) ) : '',
+            'date_from' => isset( $_GET['date_from'] ) ? sanitize_text_field( wp_unslash( $_GET['date_from'] ) ) : '',
+            'date_to'   => isset( $_GET['date_to'] ) ? sanitize_text_field( wp_unslash( $_GET['date_to'] ) ) : '',
+        );
+        $page     = isset( $_GET['paged'] ) ? max( 1, absint( $_GET['paged'] ) ) : 1;
+        $per_page = 25;
+        $rows     = $this->get_training_payment_records( $filters, $per_page, ( $page - 1 ) * $per_page );
+        $totals   = $this->get_training_payment_totals();
+        $has_table = ! empty( $totals['count'] ) || ! empty( $rows );
+        $base_url = admin_url( 'admin.php?page=pph-payments' );
+        ?>
+        <div class="wrap pph-admin-page">
+            <h1>Payments</h1>
+            <p>Training/Education Stripe Checkout payments recorded by the Briggs Stripe Checkout integration. HIPAAtizer payments are not included yet.</p>
+            <div class="pph-stat-grid">
+                <div class="pph-stat-card"><strong>Total records</strong><h2><?php echo esc_html( number_format_i18n( $totals['count'] ) ); ?></h2></div>
+                <div class="pph-stat-card"><strong>Successful payments</strong><h2><?php echo esc_html( number_format_i18n( $totals['paid_count'] ) ); ?></h2></div>
+                <div class="pph-stat-card"><strong>Collected (USD)</strong><h2>$<?php echo esc_html( number_format_i18n( $totals['paid_cents'] / 100, 2 ) ); ?></h2></div>
+                <div class="pph-stat-card"><strong>Pending / Expired</strong><h2><?php echo esc_html( number_format_i18n( $totals['pending_count'] ) . ' / ' . number_format_i18n( $totals['expired_count'] ) ); ?></h2></div>
+            </div>
+            <form method="get" style="margin:18px 0;display:flex;gap:8px;flex-wrap:wrap;align-items:end;">
+                <input type="hidden" name="page" value="pph-payments">
+                <label>Search<br><input type="search" name="s" value="<?php echo esc_attr( $filters['search'] ); ?>" placeholder="Name, email, or transaction ID"></label>
+                <label>Status<br><select name="status">
+                    <option value="">All statuses</option>
+                    <?php foreach ( array( 'paid' => 'Paid', 'pending' => 'Pending', 'expired' => 'Expired' ) as $value => $label ) : ?>
+                        <option value="<?php echo esc_attr( $value ); ?>" <?php selected( $filters['status'], $value ); ?>><?php echo esc_html( $label ); ?></option>
+                    <?php endforeach; ?>
+                </select></label>
+                <label>From<br><input type="date" name="date_from" value="<?php echo esc_attr( $filters['date_from'] ); ?>"></label>
+                <label>To<br><input type="date" name="date_to" value="<?php echo esc_attr( $filters['date_to'] ); ?>"></label>
+                <?php submit_button( 'Filter', 'secondary', '', false ); ?>
+                <a class="button" href="<?php echo esc_url( $base_url ); ?>">Reset</a>
+                <?php
+                $export_args = array(
+                    'action'   => 'pph_export_payments',
+                    's'        => $filters['search'],
+                    'status'   => $filters['status'],
+                    'date_from'=> $filters['date_from'],
+                    'date_to'  => $filters['date_to'],
+                );
+                $export_args = array_filter( $export_args, static function ( $value ) { return '' !== $value; } );
+                $export_url = wp_nonce_url(
+                    add_query_arg( $export_args, admin_url( 'admin-post.php' ) ),
+                    'pph_export_payments'
+                );
+                ?>
+                <a class="button button-primary" href="<?php echo esc_url( $export_url ); ?>">Export CSV</a>
+            </form>
+            <?php if ( ! $has_table ) : ?>
+                <div class="notice notice-info"><p>No payment records are available yet. The payment table is created by the Briggs Stripe Checkout plugin when it runs. Successful or expired Checkout Sessions will appear after the configured Stripe webhook sends the event.</p></div>
+            <?php endif; ?>
+            <table class="widefat striped">
+                <thead><tr><th>Date</th><th>Customer</th><th>Description</th><th>Amount</th><th>Status</th><th>Mode</th><th>Stripe reference</th></tr></thead>
+                <tbody>
+                <?php if ( empty( $rows ) ) : ?>
+                    <tr><td colspan="7">No matching payment records.</td></tr>
+                <?php else : foreach ( $rows as $row ) : ?>
+                    <tr>
+                        <td><?php echo esc_html( $row['paid_at'] ?: $row['created_at'] ); ?></td>
+                        <td><?php echo esc_html( $row['customer_name'] ?: '—' ); ?><br><small><?php echo esc_html( $row['customer_email'] ); ?></small></td>
+                        <td><?php echo esc_html( $row['description'] ); ?></td>
+                        <td><?php echo esc_html( strtoupper( $row['currency'] ) . ' ' . number_format_i18n( (int) $row['amount_cents'] / 100, 2 ) ); ?></td>
+                        <td><?php echo esc_html( ucfirst( $row['status'] ) ); ?></td>
+                        <td><?php echo ! empty( $row['livemode'] ) ? 'Live' : 'Test'; ?></td>
+                        <td><code><?php echo esc_html( $row['payment_intent_id'] ?: $row['session_id'] ); ?></code></td>
+                    </tr>
+                <?php endforeach; endif; ?>
+                </tbody>
+            </table>
+            <p class="description">This page is view and export only. Payment records cannot be edited or deleted here.</p>
+        </div>
+        <?php
+    }
+
+    public function export_payments_csv(): void {
+        if ( ! current_user_can( 'manage_patient_portal' ) ) {
+            wp_die( esc_html__( 'You are not allowed to export payment records.', 'patient-portal-hipaatizer' ) );
+        }
+        check_admin_referer( 'pph_export_payments' );
+        $filters = array(
+            'search'    => isset( $_GET['s'] ) ? sanitize_text_field( wp_unslash( $_GET['s'] ) ) : '',
+            'status'    => isset( $_GET['status'] ) ? sanitize_key( wp_unslash( $_GET['status'] ) ) : '',
+            'date_from' => isset( $_GET['date_from'] ) ? sanitize_text_field( wp_unslash( $_GET['date_from'] ) ) : '',
+            'date_to'   => isset( $_GET['date_to'] ) ? sanitize_text_field( wp_unslash( $_GET['date_to'] ) ) : '',
+        );
+        $rows = $this->get_training_payment_records( $filters, 0, 0 );
+        nocache_headers();
+        header( 'Content-Type: text/csv; charset=utf-8' );
+        header( 'Content-Disposition: attachment; filename=training-education-payments-' . gmdate( 'Y-m-d' ) . '.csv' );
+        $out = fopen( 'php://output', 'w' );
+        fputcsv( $out, array( 'Date', 'Customer Name', 'Customer Email', 'Description', 'Amount Cents', 'Currency', 'Status', 'Mode', 'Checkout Session ID', 'Payment Intent ID' ) );
+        foreach ( $rows as $row ) {
+            fputcsv( $out, array(
+                $row['paid_at'] ?: $row['created_at'],
+                $row['customer_name'],
+                $row['customer_email'],
+                $row['description'],
+                (int) $row['amount_cents'],
+                strtoupper( $row['currency'] ),
+                $row['status'],
+                ! empty( $row['livemode'] ) ? 'live' : 'test',
+                $row['session_id'],
+                $row['payment_intent_id'],
+            ) );
+        }
+        fclose( $out );
+        exit;
     }
 
     public function dashboard_page(): void {

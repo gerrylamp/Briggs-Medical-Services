@@ -13,3 +13,5 @@
 # Allow IV Treatment Finder plugin
 !wp-content/plugins/patient-portal-hipaatizer/
 !wp-content/plugins/patient-portal-hipaatizer/**
+!wp-content/plugins/briggs-stripe-checkout/
+!wp-content/plugins/briggs-stripe-checkout/**
